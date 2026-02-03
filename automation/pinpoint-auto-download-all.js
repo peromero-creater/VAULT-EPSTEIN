@@ -109,92 +109,128 @@ async function downloadAllDocuments(page) {
 
     await sleep(5000);
 
-    console.log('🔍 Finding all document links...');
+    console.log('🔍 Starting document download process...');
+    console.log('💡 Will handle pagination automatically as we go!\n');
 
-    // Get all document links from the list
-    // Based on your screenshot, they appear to be in the left panel
-    const documentLinks = await page.evaluate(() => {
-        // Look for all PDF links in the document list
-        const links = Array.from(document.querySelectorAll('a[href*="/document/"], .document-item a, [role="listitem"] a'));
-        return links.map(link => ({
-            href: link.href,
-            text: link.textContent.trim()
-        })).filter(link => link.href && link.href.includes('/document/'));
-    });
-
-    console.log(`✓ Found ${documentLinks.length} documents`);
-
-    if (documentLinks.length === 0) {
-        console.log('⚠️  No documents found. Taking screenshot...');
-        await page.screenshot({ path: path.join(CONFIG.DOWNLOAD_DIR, 'debug.png'), fullPage: true });
-        throw new Error('No documents found');
-    }
-
-    console.log(`\n📄 Starting to download ${documentLinks.length} documents...`);
-    console.log('💡 This will take a while. Progress will be saved!\n');
-
-    const totalDocs = documentLinks.length;
+    let processedCount = 0;
     const downloadedFiles = [];
     let uploadedCount = 0;
+    const processedUrls = new Set();
 
-    for (let i = 0; i < totalDocs; i++) {
-        const docLink = documentLinks[i];
-        const docNum = i + 1;
+    // Target is 4609 documents total
+    const TARGET_DOCS = 4609;
 
-        try {
-            console.log(`[${docNum}/${totalDocs}] ${docLink.text.substring(0, 50)}...`);
+    while (processedCount < TARGET_DOCS) {
+        // Get currently visible documents on this page
+        const documentLinks = await page.evaluate(() => {
+            const links = Array.from(document.querySelectorAll('a[href*="/document/"], .document-item a, [role="listitem"] a'));
+            return links.map(link => ({
+                href: link.href,
+                text: link.textContent.trim()
+            })).filter(link => link.href && link.href.includes('/document/'));
+        });
 
-            // Navigate to the document
-            await page.goto(docLink.href, {
-                waitUntil: 'networkidle2',
-                timeout: 30000
-            });
+        if (documentLinks.length === 0) {
+            console.log('⚠️  No more documents found on this page');
+            break;
+        }
 
-            await sleep(CONFIG.DELAY_AFTER_CLICK);
-
-            // Press Ctrl+P to open print dialog
-            await page.keyboard.down('Control');
-            await page.keyboard.press('KeyP');
-            await page.keyboard.up('Control');
-
-            await sleep(CONFIG.DELAY_AFTER_PRINT);
-
-            // The print dialog should open and Chrome should handle the "Save as PDF"
-            // If Chrome is configured to save PDFs automatically, they'll go to the download folder
-
-            console.log('  ✓ Print initiated');
-
-            await sleep(CONFIG.DELAY_BETWEEN_DOCS);
-
-            // Every 10 documents, check for new PDFs and upload them
-            if (docNum % CONFIG.UPLOAD_BATCH_SIZE === 0) {
-                console.log(`\n📤 Checking for PDFs to upload...`);
-
-                const files = await fs.readdir(CONFIG.DOWNLOAD_DIR);
-                const pdfFiles = files.filter(f => f.endsWith('.pdf'));
-                const newFiles = pdfFiles.filter(f => !downloadedFiles.includes(f));
-
-                if (newFiles.length > 0) {
-                    console.log(`📥 Found ${newFiles.length} new PDFs, uploading...`);
-                    const filePaths = newFiles.map(f => path.join(CONFIG.DOWNLOAD_DIR, f));
-                    const results = await uploadToVault(filePaths);
-
-                    uploadedCount += results.uploaded.length;
-                    downloadedFiles.push(...newFiles);
-
-                    console.log(`✅ Uploaded ${results.uploaded.length} files (Total: ${uploadedCount})`);
-                }
-
-                console.log(`\n📊 Progress: ${docNum}/${totalDocs} documents processed\n`);
+        // Process each document on the current page
+        for (const docLink of documentLinks) {
+            // Skip if already processed
+            if (processedUrls.has(docLink.href)) {
+                continue;
             }
 
-        } catch (error) {
-            console.log(`  ❌ Error: ${error.message}`);
-            // Continue with next document
+            processedCount++;
+            processedUrls.add(docLink.href);
+
+            try {
+                console.log(`[${processedCount}/${TARGET_DOCS}] ${docLink.text.substring(0, 50)}...`);
+
+                // Navigate to document
+                await page.goto(docLink.href, {
+                    waitUntil: 'networkidle2',
+                    timeout: 30000
+                });
+
+                await sleep(CONFIG.DELAY_AFTER_CLICK);
+
+                // Press Ctrl+P
+                await page.keyboard.down('Control');
+                await page.keyboard.press('KeyP');
+                await page.keyboard.up('Control');
+
+                await sleep(CONFIG.DELAY_AFTER_PRINT);
+
+                console.log('  ✓ Print initiated');
+
+                // Go back to list
+                await page.goto(CONFIG.PINPOINT_URL, {
+                    waitUntil: 'networkidle2',
+                    timeout: 30000
+                });
+
+                await sleep(CONFIG.DELAY_BETWEEN_DOCS);
+
+                // Upload batch every 10 documents
+                if (processedCount % CONFIG.UPLOAD_BATCH_SIZE === 0) {
+                    console.log(`\n📤 Checking for PDFs to upload...`);
+
+                    const files = await fs.readdir(CONFIG.DOWNLOAD_DIR);
+                    const pdfFiles = files.filter(f => f.endsWith('.pdf'));
+                    const newFiles = pdfFiles.filter(f => !downloadedFiles.includes(f));
+
+                    if (newFiles.length > 0) {
+                        console.log(`📥 Found ${newFiles.length} new PDFs, uploading...`);
+                        const filePaths = newFiles.map(f => path.join(CONFIG.DOWNLOAD_DIR, f));
+                        const results = await uploadToVault(filePaths);
+
+                        uploadedCount += results.uploaded.length;
+                        downloadedFiles.push(...newFiles);
+
+                        console.log(`✅ Uploaded ${results.uploaded.length} files (Total: ${uploadedCount})`);
+                    }
+
+                    console.log(`\n📊 Progress: ${processedCount}/${TARGET_DOCS} documents processed\n`);
+                }
+
+            } catch (error) {
+                console.log(`  ❌ Error: ${error.message}`);
+                // Go back to list to continue
+                try {
+                    await page.goto(CONFIG.PINPOINT_URL, {
+                        waitUntil: 'networkidle2',
+                        timeout: 30000
+                    });
+                } catch (e) {
+                    // ignore
+                }
+            }
+        }
+
+        // Scroll down to load more documents (if using infinite scroll)
+        console.log('\n⬇️  Scrolling to load more documents...');
+        await page.evaluate(() => {
+            window.scrollTo(0, document.body.scrollHeight);
+        });
+
+        await sleep(3000);
+
+        // Or click "Next" button if pagination exists
+        try {
+            const nextButton = await page.$('button:has-text("Next"), a:has-text("Next"), [aria-label*="Next"]');
+            if (nextButton) {
+                console.log('➡️  Clicking Next page...');
+                await nextButton.click();
+                await sleep(3000);
+            }
+        } catch (e) {
+            // No next button or scroll is enough
         }
     }
 
-    // Final upload of remaining files
+    // Final upload
     console.log('\n📤 Final upload check...');
     const files = await fs.readdir(CONFIG.DOWNLOAD_DIR);
     const pdfFiles = files.filter(f => f.endsWith('.pdf'));
@@ -207,7 +243,7 @@ async function downloadAllDocuments(page) {
     }
 
     return {
-        totalProcessed: totalDocs,
+        totalProcessed: processedCount,
         totalUploaded: uploadedCount,
         totalDownloaded: pdfFiles.length
     };
