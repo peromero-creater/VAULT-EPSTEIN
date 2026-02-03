@@ -69,14 +69,47 @@ async function uploadToVault(filePaths) {
 }
 
 async function processPage(browser, page, pageNum, processedSet) {
-    // Get all document links
-    const links = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll('a[href*="/document/"]'))
-            .map(a => ({ href: a.href, text: a.innerText.trim() }))
-            .filter(l => l.text.endsWith('.pdf') || l.href.includes('.pdf'));
+    // 1. Force scroll the list container to trigger lazy loading and reveal pagination
+    console.log('⬇️  Scrolling list to bottom...');
+
+    await page.evaluate(async () => {
+        // Try to find the scrollable list container
+        const listContainers = Array.from(document.querySelectorAll('div[style*="overflow"], div[class*="scroll"], main'));
+        // Scroll all candidates just in case
+        for (const div of listContainers) {
+            div.scrollTop = div.scrollHeight;
+        }
+        window.scrollTo(0, document.body.scrollHeight);
+
+        // Specific hack for Pinpoint's layout: finding the main list div
+        const mainList = document.querySelector('div[role="main"], div[role="list"]');
+        if (mainList) mainList.scrollTop = mainList.scrollHeight;
     });
 
-    console.log(`\n📄 Page ${pageNum}: Found ${links.length} documents`);
+    await sleep(3000); // Wait for scroll to settle
+
+    // 2. Get all document links (relaxed selector)
+    const links = await page.evaluate(() => {
+        // Look for ANY link inside the list items
+        const rows = Array.from(document.querySelectorAll('div[role="row"], div[role="listitem"], .document-item'));
+        const results = [];
+
+        for (const row of rows) {
+            const anchor = row.querySelector('a');
+            if (anchor && anchor.href) {
+                results.push({ href: anchor.href, text: anchor.innerText.trim() });
+            }
+        }
+
+        // Fallback if no rows found
+        if (results.length === 0) {
+            return Array.from(document.querySelectorAll('a[href*="/document/"]'))
+                .map(a => ({ href: a.href, text: a.innerText.trim() }));
+        }
+        return results;
+    });
+
+    console.log(`\n📄 Page ${pageNum}: Found ${links.length} visible documents`);
 
     let newDocsOnPage = 0;
 
@@ -87,12 +120,12 @@ async function processPage(browser, page, pageNum, processedSet) {
         processedSet.add(link.href);
         newDocsOnPage++;
 
-        console.log(`  [${processedSet.size}] Downloading: ${link.text.substring(0, 40)}...`);
+        const shortName = link.text.length > 40 ? link.text.substring(0, 40) + '...' : link.text;
+        console.log(`  [${processedSet.size}] Downloading: ${shortName}`);
 
         // OPEN IN NEW TAB
         const newPage = await browser.newPage();
         try {
-            // Set download behavior for new tab
             const client = await newPage.target().createCDPSession();
             await client.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: CONFIG.DOWNLOAD_DIR });
 
@@ -112,23 +145,11 @@ async function processPage(browser, page, pageNum, processedSet) {
             await newPage.close();
         }
 
-        // Upload check every 5 docs
-        if (processedSet.size % 5 === 0) {
-            await checkAndUpload();
-        }
+        // Quick upload check
+        if (processedSet.size % 5 === 0) await checkAndUpload();
     }
 
     return newDocsOnPage;
-}
-
-async function checkAndUpload() {
-    const files = await fs.readdir(CONFIG.DOWNLOAD_DIR);
-    const pdfs = files.filter(f => f.endsWith('.pdf'));
-    // Simple check: Just upload everything that looks like a PDF
-    const results = await uploadToVault(pdfs.map(f => path.join(CONFIG.DOWNLOAD_DIR, f)));
-    if (results.uploaded.length > 0) {
-        console.log(`    📤 Auto-uploaded ${results.uploaded.length} files`);
-    }
 }
 
 async function main() {
@@ -140,7 +161,8 @@ async function main() {
     const browser = await puppeteer.launch({
         headless: false,
         defaultViewport: null,
-        args: ['--start-maximized', `--user-data-dir=${CONFIG.CHROME_USER_DATA}`]
+        // Add these args to ensure window opens large enough
+        args: ['--start-maximized', `--user-data-dir=${CONFIG.CHROME_USER_DATA}`, '--window-size=1920,1080']
     });
 
     const page = (await browser.pages())[0];
@@ -148,41 +170,62 @@ async function main() {
     console.log('🌐 Opening Pinpoint...');
     await page.goto(CONFIG.PINPOINT_URL);
 
-    console.log('⏳ Waiting 10s for you to ensure filters are correct...');
-    await sleep(10000); // Give user time to see the page
+    console.log('⏳ Waiting 10s for initial load...');
+    await sleep(10000);
 
     let currentPage = 1;
     const processedSet = new Set();
 
     while (true) {
-        // 1. Process all docs on current page
+        // 1. Process docs
         const count = await processPage(browser, page, currentPage, processedSet);
 
-        if (count === 0 && processedSet.size > 0) {
-            console.log('⚠️ No new documents found on this page.');
+        if (count === 0 && processedSet.size > 0 && currentPage === 1) {
+            console.log('⚠️ Warning: Found 0 documents on Page 1. Selectors might need adjustment.');
         }
 
         // 2. Find and click "Next" button
-        // The arrow is usually an SVG or button with aria-label
-        // Look for right arrow icon or button at bottom
         console.log('🔎 Looking for Next Page button...');
 
-        const nextButton = await page.evaluateHandle(() => {
-            // Logic: Find the pagination container, then the active page, then the next element
-            // Or find button with 'chevron_right' or aria-label='Next page'
-            const buttons = Array.from(document.querySelectorAll('div[role="button"], button'));
-            // Pinpoint pagination usually looks like numbers and arrows
-            // The Next button is typically the last one or has specific aria
-            return buttons.find(b => b.ariaLabel?.includes('Next') || b.textContent.trim() === '>' || b.querySelector('i')?.textContent === 'chevron_right');
+        // More aggressive scroll to bottom before looking for next button
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+
+        const nextButtonFound = await page.evaluate(async () => {
+            // Find all buttons
+            const buttons = Array.from(document.querySelectorAll('div[role="button"], button, a'));
+
+            // Look for the specific "Next" or ">" or chevron
+            // Based on your screenshot, it looks like a standard pagination block at the bottom
+            const nextBtn = buttons.find(b => {
+                const text = b.innerText?.trim();
+                const aria = b.getAttribute('aria-label');
+                return (aria && aria.includes('Next')) || text === '>' || text === 'Next' || b.innerHTML.includes('chevron_right');
+            });
+
+            if (nextBtn) {
+                nextBtn.click();
+                return true;
+            }
+
+            // Fallback: looking for the specific page number logic
+            // e.g. if we are on page 1, look for "2"
+            const pageButtons = buttons.filter(b => !isNaN(parseInt(b.innerText)));
+            // This is risky without knowing current page distinctively, so stick to next arrow
+
+            return false;
         });
 
-        if (nextButton && nextButton.asElement()) {
-            console.log('➡️ Clicking Next Page...');
-            await nextButton.click();
+        if (nextButtonFound) {
+            console.log('➡️ Clicked Next Page!');
             await sleep(CONFIG.DELAY_NEXT_PAGE);
             currentPage++;
         } else {
-            console.log('🛑 No "Next" button found. We managed to reach the end!');
+            console.log('🛑 No "Next" button found (or already at end).');
+
+            // Double check: if we found 0 docs and no next button on page 1, something is wrong
+            if (currentPage === 1 && count === 0) {
+                console.log('❌ FATAL: Could not find documents OR next button. Please check the browser window.');
+            }
             break;
         }
     }
