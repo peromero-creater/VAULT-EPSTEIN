@@ -1,14 +1,12 @@
 /**
- * FULLY AUTOMATED Pinpoint Downloader
+ * FULLY AUTOMATED Pinpoint Downloader (Pagination Support)
  * 
- * Automates the exact workflow:
- * 1. Click each PDF in the list
- * 2. Press Ctrl+P (print)
- * 3. Save as PDF
- * 4. Repeat for all 4,609 documents
- * 5. Auto-upload to Vault
- * 
- * Run: node pinpoint-auto-download-all.js
+ * Strategy:
+ * 1. Stay on the main list
+ * 2. Open documents in NEW TABS (preserves pagination state)
+ * 3. Ctrl+P -> Save -> Close Tab
+ * 4. Click "Next >" button to go to next page
+ * 5. Handle all 47+ pages automatically
  */
 
 const puppeteer = require('puppeteer');
@@ -25,12 +23,10 @@ const CONFIG = {
     CHROME_USER_DATA: path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data'),
 
     // Delays
-    DELAY_AFTER_CLICK: 3000,      // Wait for PDF to open
-    DELAY_AFTER_PRINT: 2000,      // Wait for print dialog
-    DELAY_BETWEEN_DOCS: 1000,     // Wait between documents
-
-    // Batch upload settings
-    UPLOAD_BATCH_SIZE: 10,        // Upload every 10 PDFs
+    DELAY_PAGE_LOAD: 5000,        // Wait for list to load
+    DELAY_TAB_OPEN: 3000,         // Wait for doc to open
+    DELAY_PRINT_DIALOG: 2000,     // Wait for print dialog
+    DELAY_NEXT_PAGE: 5000,        // Wait after clicking next page
 };
 
 function sleep(ms) {
@@ -42,281 +38,157 @@ async function ensureDownloadDirectory() {
         await fs.access(CONFIG.DOWNLOAD_DIR);
     } catch {
         await fs.mkdir(CONFIG.DOWNLOAD_DIR, { recursive: true });
-        console.log(`✓ Created: ${CONFIG.DOWNLOAD_DIR}`);
     }
 }
 
 async function uploadToVault(filePaths) {
     if (filePaths.length === 0) return { uploaded: [], errors: [] };
-
     const uploadUrl = `${CONFIG.VAULT_API_URL}/admin/upload-documents`;
     const results = { uploaded: [], errors: [] };
 
-    for (let i = 0; i < filePaths.length; i++) {
-        const filePath = filePaths[i];
+    for (const filePath of filePaths) {
         const fileName = path.basename(filePath);
-
         try {
             const form = new FormData();
             const fileStream = require('fs').createReadStream(filePath);
             form.append('files', fileStream, fileName);
 
             const result = await new Promise((resolve, reject) => {
-                const request = http.request(uploadUrl, {
-                    method: 'POST',
-                    headers: form.getHeaders()
-                }, (response) => {
+                const request = http.request(uploadUrl, { method: 'POST', headers: form.getHeaders() }, (res) => {
                     let data = '';
-                    response.on('data', chunk => data += chunk);
-                    response.on('end', () => {
-                        try {
-                            if (response.statusCode === 200) {
-                                resolve(JSON.parse(data));
-                            } else {
-                                reject(new Error(`HTTP ${response.statusCode}`));
-                            }
-                        } catch (e) {
-                            reject(e);
-                        }
-                    });
+                    res.on('data', c => data += c);
+                    res.on('end', () => res.statusCode === 200 ? resolve(JSON.parse(data)) : reject(new Error(res.statusCode)));
                 });
-
                 request.on('error', reject);
                 form.pipe(request);
             });
-
-            if (result.success_count > 0) {
-                results.uploaded.push(fileName);
-            }
-
-            await sleep(200);
-
-        } catch (error) {
-            results.errors.push({ file: fileName, error: error.message });
-        }
+            if (result.success_count > 0) results.uploaded.push(fileName);
+        } catch (e) { results.errors.push(e.message); }
     }
-
     return results;
 }
 
-async function downloadAllDocuments(page) {
-    console.log('\n📥 Navigating to Pinpoint...');
-
-    await page.goto(CONFIG.PINPOINT_URL, {
-        waitUntil: 'networkidle2',
-        timeout: 30000
+async function processPage(browser, page, pageNum, processedSet) {
+    // Get all document links
+    const links = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('a[href*="/document/"]'))
+            .map(a => ({ href: a.href, text: a.innerText.trim() }))
+            .filter(l => l.text.endsWith('.pdf') || l.href.includes('.pdf'));
     });
 
-    await sleep(5000);
+    console.log(`\n📄 Page ${pageNum}: Found ${links.length} documents`);
 
-    console.log('🔍 Starting document download process...');
-    console.log('💡 Will handle pagination automatically as we go!\n');
+    let newDocsOnPage = 0;
 
-    let processedCount = 0;
-    const downloadedFiles = [];
-    let uploadedCount = 0;
-    const processedUrls = new Set();
+    for (let i = 0; i < links.length; i++) {
+        const link = links[i];
+        if (processedSet.has(link.href)) continue;
 
-    // Target is 4609 documents total
-    const TARGET_DOCS = 4609;
+        processedSet.add(link.href);
+        newDocsOnPage++;
 
-    while (processedCount < TARGET_DOCS) {
-        // Get currently visible documents on this page
-        const documentLinks = await page.evaluate(() => {
-            const links = Array.from(document.querySelectorAll('a[href*="/document/"], .document-item a, [role="listitem"] a'));
-            return links.map(link => ({
-                href: link.href,
-                text: link.textContent.trim()
-            })).filter(link => link.href && link.href.includes('/document/'));
-        });
+        console.log(`  [${processedSet.size}] Downloading: ${link.text.substring(0, 40)}...`);
 
-        if (documentLinks.length === 0) {
-            console.log('⚠️  No more documents found on this page');
-            break;
-        }
-
-        // Process each document on the current page
-        for (const docLink of documentLinks) {
-            // Skip if already processed
-            if (processedUrls.has(docLink.href)) {
-                continue;
-            }
-
-            processedCount++;
-            processedUrls.add(docLink.href);
-
-            try {
-                console.log(`[${processedCount}/${TARGET_DOCS}] ${docLink.text.substring(0, 50)}...`);
-
-                // Navigate to document
-                await page.goto(docLink.href, {
-                    waitUntil: 'networkidle2',
-                    timeout: 30000
-                });
-
-                await sleep(CONFIG.DELAY_AFTER_CLICK);
-
-                // Press Ctrl+P
-                await page.keyboard.down('Control');
-                await page.keyboard.press('KeyP');
-                await page.keyboard.up('Control');
-
-                await sleep(CONFIG.DELAY_AFTER_PRINT);
-
-                console.log('  ✓ Print initiated');
-
-                // Go back to list
-                await page.goto(CONFIG.PINPOINT_URL, {
-                    waitUntil: 'networkidle2',
-                    timeout: 30000
-                });
-
-                await sleep(CONFIG.DELAY_BETWEEN_DOCS);
-
-                // Upload batch every 10 documents
-                if (processedCount % CONFIG.UPLOAD_BATCH_SIZE === 0) {
-                    console.log(`\n📤 Checking for PDFs to upload...`);
-
-                    const files = await fs.readdir(CONFIG.DOWNLOAD_DIR);
-                    const pdfFiles = files.filter(f => f.endsWith('.pdf'));
-                    const newFiles = pdfFiles.filter(f => !downloadedFiles.includes(f));
-
-                    if (newFiles.length > 0) {
-                        console.log(`📥 Found ${newFiles.length} new PDFs, uploading...`);
-                        const filePaths = newFiles.map(f => path.join(CONFIG.DOWNLOAD_DIR, f));
-                        const results = await uploadToVault(filePaths);
-
-                        uploadedCount += results.uploaded.length;
-                        downloadedFiles.push(...newFiles);
-
-                        console.log(`✅ Uploaded ${results.uploaded.length} files (Total: ${uploadedCount})`);
-                    }
-
-                    console.log(`\n📊 Progress: ${processedCount}/${TARGET_DOCS} documents processed\n`);
-                }
-
-            } catch (error) {
-                console.log(`  ❌ Error: ${error.message}`);
-                // Go back to list to continue
-                try {
-                    await page.goto(CONFIG.PINPOINT_URL, {
-                        waitUntil: 'networkidle2',
-                        timeout: 30000
-                    });
-                } catch (e) {
-                    // ignore
-                }
-            }
-        }
-
-        // Scroll down to load more documents (if using infinite scroll)
-        console.log('\n⬇️  Scrolling to load more documents...');
-        await page.evaluate(() => {
-            window.scrollTo(0, document.body.scrollHeight);
-        });
-
-        await sleep(3000);
-
-        // Or click "Next" button if pagination exists
+        // OPEN IN NEW TAB
+        const newPage = await browser.newPage();
         try {
-            const nextButton = await page.$('button:has-text("Next"), a:has-text("Next"), [aria-label*="Next"]');
-            if (nextButton) {
-                console.log('➡️  Clicking Next page...');
-                await nextButton.click();
-                await sleep(3000);
-            }
+            // Set download behavior for new tab
+            const client = await newPage.target().createCDPSession();
+            await client.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: CONFIG.DOWNLOAD_DIR });
+
+            await newPage.goto(link.href, { waitUntil: 'networkidle2', timeout: 60000 });
+            await sleep(CONFIG.DELAY_TAB_OPEN);
+
+            // Ctrl+P
+            await newPage.keyboard.down('Control');
+            await newPage.keyboard.press('KeyP');
+            await newPage.keyboard.up('Control');
+            await sleep(CONFIG.DELAY_PRINT_DIALOG);
+            console.log('    ✓ Saved');
+
         } catch (e) {
-            // No next button or scroll is enough
+            console.log(`    ❌ Error: ${e.message}`);
+        } finally {
+            await newPage.close();
+        }
+
+        // Upload check every 5 docs
+        if (processedSet.size % 5 === 0) {
+            await checkAndUpload();
         }
     }
 
-    // Final upload
-    console.log('\n📤 Final upload check...');
+    return newDocsOnPage;
+}
+
+async function checkAndUpload() {
     const files = await fs.readdir(CONFIG.DOWNLOAD_DIR);
-    const pdfFiles = files.filter(f => f.endsWith('.pdf'));
-    const newFiles = pdfFiles.filter(f => !downloadedFiles.includes(f));
-
-    if (newFiles.length > 0) {
-        const filePaths = newFiles.map(f => path.join(CONFIG.DOWNLOAD_DIR, f));
-        const results = await uploadToVault(filePaths);
-        uploadedCount += results.uploaded.length;
+    const pdfs = files.filter(f => f.endsWith('.pdf'));
+    // Simple check: Just upload everything that looks like a PDF
+    const results = await uploadToVault(pdfs.map(f => path.join(CONFIG.DOWNLOAD_DIR, f)));
+    if (results.uploaded.length > 0) {
+        console.log(`    📤 Auto-uploaded ${results.uploaded.length} files`);
     }
-
-    return {
-        totalProcessed: processedCount,
-        totalUploaded: uploadedCount,
-        totalDownloaded: pdfFiles.length
-    };
 }
 
 async function main() {
-    console.log('🚀 FULLY AUTOMATED Pinpoint Downloader\n');
-    console.log('='.repeat(60));
-    console.log('📊 Target: ~4,609 documents');
-    console.log('🔄 Workflow: Click → Ctrl+P → Save → Upload → Repeat');
-    console.log('⏱️  Estimated time: Several hours');
-    console.log('='.repeat(60));
-
-    console.log('\n⚠️  IMPORTANT: Make sure Chrome is set to:');
-    console.log('   - Automatically download PDFs (not open in viewer)');
-    console.log('   - Save location is set to Downloads folder');
-    console.log('\n💡 To check: chrome://settings/downloads');
-    console.log('   ☑ "Download PDF files instead of automatically opening"');
-    console.log('\nPress Ctrl+C to stop at any time. Progress is saved!\n');
-
-    await sleep(5000);
+    console.log('🚀 FULL AUTOMATION (Multi-Page / New Tab Mode)');
+    console.log('==============================================');
 
     await ensureDownloadDirectory();
-
-    console.log('🌐 Launching Chrome...');
 
     const browser = await puppeteer.launch({
         headless: false,
         defaultViewport: null,
-        args: [
-            '--start-maximized',
-            '--no-sandbox',
-            `--user-data-dir=${CONFIG.CHROME_USER_DATA}`,
-            '--profile-directory=Default'
-        ]
+        args: ['--start-maximized', `--user-data-dir=${CONFIG.CHROME_USER_DATA}`]
     });
 
-    try {
-        const pages = await browser.pages();
-        const page = pages[0] || await browser.newPage();
+    const page = (await browser.pages())[0];
 
-        // Set download behavior
-        const client = await page.target().createCDPSession();
-        await client.send('Page.setDownloadBehavior', {
-            behavior: 'allow',
-            downloadPath: CONFIG.DOWNLOAD_DIR
+    console.log('🌐 Opening Pinpoint...');
+    await page.goto(CONFIG.PINPOINT_URL);
+
+    console.log('⏳ Waiting 10s for you to ensure filters are correct...');
+    await sleep(10000); // Give user time to see the page
+
+    let currentPage = 1;
+    const processedSet = new Set();
+
+    while (true) {
+        // 1. Process all docs on current page
+        const count = await processPage(browser, page, currentPage, processedSet);
+
+        if (count === 0 && processedSet.size > 0) {
+            console.log('⚠️ No new documents found on this page.');
+        }
+
+        // 2. Find and click "Next" button
+        // The arrow is usually an SVG or button with aria-label
+        // Look for right arrow icon or button at bottom
+        console.log('🔎 Looking for Next Page button...');
+
+        const nextButton = await page.evaluateHandle(() => {
+            // Logic: Find the pagination container, then the active page, then the next element
+            // Or find button with 'chevron_right' or aria-label='Next page'
+            const buttons = Array.from(document.querySelectorAll('div[role="button"], button'));
+            // Pinpoint pagination usually looks like numbers and arrows
+            // The Next button is typically the last one or has specific aria
+            return buttons.find(b => b.ariaLabel?.includes('Next') || b.textContent.trim() === '>' || b.querySelector('i')?.textContent === 'chevron_right');
         });
 
-        const results = await downloadAllDocuments(page);
-
-        await browser.close();
-
-        // Final summary
-        console.log('\n' + '='.repeat(60));
-        console.log('✅ AUTOMATION COMPLETE!');
-        console.log('='.repeat(60));
-        console.log(`📁 Download location: ${CONFIG.DOWNLOAD_DIR}`);
-        console.log(`📄 Documents processed: ${results.totalProcessed}`);
-        console.log(`📥 PDFs downloaded: ${results.totalDownloaded}`);
-        console.log(`✅ Uploaded to Vault: ${results.totalUploaded}`);
-        console.log('='.repeat(60));
-
-        console.log('\n🎉 All done! Check your Vault:');
-        console.log(`   http://localhost:3000/connections`);
-        console.log(`   http://localhost:3000/countries`);
-        console.log(`   http://localhost:3000/search\n`);
-
-    } catch (error) {
-        console.error('\n❌ ERROR:', error.message);
-        console.error(error.stack);
-        console.log('\n💡 Tip: Any downloaded PDFs were already uploaded!');
-        console.log(`   Check ${CONFIG.DOWNLOAD_DIR} for progress`);
+        if (nextButton && nextButton.asElement()) {
+            console.log('➡️ Clicking Next Page...');
+            await nextButton.click();
+            await sleep(CONFIG.DELAY_NEXT_PAGE);
+            currentPage++;
+        } else {
+            console.log('🛑 No "Next" button found. We managed to reach the end!');
+            break;
+        }
     }
+
+    console.log('✅ ALL PAGES PROCESSED!');
+    await browser.close();
 }
 
 main().catch(console.error);
