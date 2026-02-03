@@ -1,10 +1,14 @@
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from models import Base
+try:
+    from backend.models import Base
+except ImportError:
+    from models import Base
 
 # Default to a local Postgres if possible, fallback to SQLite for immediate testing
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./vault_epstein.db")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{os.path.join(BASE_DIR, 'vault_epstein.db')}")
 
 try:
     if DATABASE_URL.startswith("sqlite"):

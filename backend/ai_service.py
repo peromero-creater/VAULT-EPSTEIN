@@ -231,18 +231,19 @@ Respond in JSON format:
         
         combined = "\n\n".join(doc_previews)
         
-        prompt = f"""Summarize the intelligence related to {country_code} from these Epstein case documents.
-
-Focus on:
-- Key individuals mentioned in connection with this country
-- Significant events or activities
-- Properties or locations
-
-Keep it to 2-3 sentences.
-
-Documents:
-{combined}
-"""
+        prompt = f"""Conduct a deep-dive intelligence briefing on activities in {country_code} based on these Epstein files.
+        
+        CRITICAL OBJECTIVES:
+        1. Identify specific political figures, elites, or royalty linked to events in this region.
+        2. detail any mentions of specific dates, hotel stays, or flight logs.
+        3. Highlight potential "black book" contacts or trafficking logistics mentioned.
+        4. Explain the *political context* if relevant (e.g. diplomatic immunity, local laws).
+        
+        TONE: Investigative, factual, and high-stakes.
+        
+        Documents Snippets:
+        {combined}
+        """
         
         try:
             if self.provider in ['openai', 'grok']:

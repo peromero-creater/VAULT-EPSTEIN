@@ -8,7 +8,12 @@ from typing import List, Optional
 import PyPDF2
 import io
 from ai_service import get_ai_service
+import os
+from fastapi.responses import FileResponse, RedirectResponse
 import countries_data
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = FastAPI(title="DOJ Document Explorer API")
 
@@ -78,14 +83,23 @@ async def search(q: str, country: Optional[str] = None, db: Session = Depends(da
         filters["countries"] = [country]
     results = search_module.search_pages(q, db=db, filters=filters)
     for hit in results:
-        doc = db.get(models.Document, hit["document_id"])
-        hit["external_url"] = doc.external_url if doc else None
-        hit["dataset"] = doc.dataset if doc else "GENERAL"
+        source = hit.get("_source", {})
+        doc_id = source.get("document_id")
+        if doc_id:
+            doc = db.get(models.Document, doc_id)
+            hit["external_url"] = doc.external_url if doc else None
+            hit["dataset"] = doc.dataset if doc else "GENERAL"
+        else:
+            hit["external_url"] = None
+            hit["dataset"] = "GENERAL"
         
         # New: Extract related entities for this page
-        page_id = hit["page_id"]
-        entities = db.query(models.Entity).join(models.PageEntity).filter(models.PageEntity.page_id == page_id).all()
-        hit["entities"] = [{"name": e.name, "type": e.type, "id": e.id} for e in entities]
+        page_id = source.get("page_id")
+        if page_id:
+            entities = db.query(models.Entity).join(models.PageEntity).filter(models.PageEntity.page_id == page_id).all()
+            hit["entities"] = [{"name": e.name, "type": e.type, "id": e.id} for e in entities]
+        else:
+             hit["entities"] = []
     return results
 
 @app.post("/upload")
@@ -222,9 +236,78 @@ async def analyze_document(doc_id: int, db: Session = Depends(database.get_db)):
     # Analyze with AI
     analysis = ai.analyze_document(text)
     
-    # Store AI analysis
+    # Store AI analysis summary
     doc.ai_analyzed = True
     doc.ai_summary = analysis.get('summary', '')
+    
+    # Persist Entities and Relationships
+    try:
+        # 1. Upsert Entities
+        name_to_id = {}
+        
+        # Combine all entities
+        all_entities = []
+        for p in analysis.get('people', []):
+             all_entities.append({"name": p, "type": "PERSON"})
+        for o in analysis.get('organizations', []):
+             all_entities.append({"name": o, "type": "ORG"})
+        for l in analysis.get('locations', []):
+             all_entities.append({"name": l, "type": "LOC"})
+             
+        for ent_data in all_entities:
+            # Check if exists
+            existing = db.query(models.Entity).filter(
+                models.Entity.name == ent_data['name'], 
+                models.Entity.type == ent_data['type']
+            ).first()
+            
+            if existing:
+                name_to_id[ent_data['name']] = existing.id
+            else:
+                new_ent = models.Entity(name=ent_data['name'], type=ent_data['type'])
+                db.add(new_ent)
+                db.flush()
+                name_to_id[ent_data['name']] = new_ent.id
+                
+            # Link to Page (first page of doc for now, or we could be more specific)
+            if pages:
+                page_id = pages[0].id
+                # Check if PageEntity exists
+                pe = db.query(models.PageEntity).filter(
+                    models.PageEntity.page_id == page_id,
+                    models.PageEntity.entity_id == name_to_id[ent_data['name']]
+                ).first()
+                if not pe:
+                    new_pe = models.PageEntity(page_id=page_id, entity_id=name_to_id[ent_data['name']])
+                    db.add(new_pe)
+
+        # 2. Insert Relationships
+        for rel in analysis.get('relationships', []):
+            source_name = rel.get('source')
+            target_name = rel.get('target')
+            
+            if source_name in name_to_id and target_name in name_to_id:
+                # Check for duplicate relationship
+                exists = db.query(models.Relationship).filter(
+                    models.Relationship.source_entity_id == name_to_id[source_name],
+                    models.Relationship.target_entity_id == name_to_id[target_name],
+                    models.Relationship.rel_type == rel.get('type')
+                ).first()
+                
+                if not exists:
+                    new_rel = models.Relationship(
+                        source_entity_id=name_to_id[source_name],
+                        target_entity_id=name_to_id[target_name],
+                        rel_type=rel.get('type'),
+                        description=rel.get('description'),
+                        confidence_score=0.8 # AI generated
+                    )
+                    db.add(new_rel)
+
+    except Exception as e:
+        print(f"Error persisting AI analysis: {e}")
+        # Don't fail the whole request, just log
+    
     db.commit()
     
     return analysis
@@ -306,6 +389,22 @@ async def search_countries(q: str = ""):
         return countries_data.search_countries(q)
     return [{"code": code, **info} for code, info in countries_data.COUNTRY_DATA.items()]
 
+@app.get("/api/suggestions")
+async def get_suggestions(q: str, db: Session = Depends(database.get_db)):
+    """Get search suggestions based on query"""
+    if len(q) < 2:
+        return []
+    
+    # Search documents titles
+    docs = db.query(models.Document.filename).filter(models.Document.filename.ilike(f"%{q}%")).limit(3).all()
+    doc_titles = [d.filename for d in docs]
+    
+    # Search entities
+    entities = db.query(models.Entity.name).filter(models.Entity.name.ilike(f"%{q}%")).limit(5).all()
+    entity_names = [e.name for e in entities]
+    
+    return list(set(doc_titles + entity_names))
+
 @app.get("/document/{doc_id}")
 async def get_document(doc_id: int, db: Session = Depends(database.get_db)):
     """Get document metadata"""
@@ -313,6 +412,67 @@ async def get_document(doc_id: int, db: Session = Depends(database.get_db)):
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
+
+@app.get("/documents/{doc_id}/raw")
+async def get_document_raw(doc_id: int, db: Session = Depends(database.get_db)):
+    """Serve the raw PDF file for a document"""
+    doc = db.get(models.Document, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    # 0. Check for S3 Path
+    if doc.path.startswith("s3://"):
+        from backend.storage import storage
+        presigned = storage.get_presigned_url(doc.path)
+        if presigned:
+            return RedirectResponse(url=presigned)
+        else:
+             raise HTTPException(status_code=500, detail="Could not generate cloud link")
+
+    # 1. Determine Project Root (parent of backend/)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(current_dir)
+    
+    # 2. Heuristic Path Resolution
+    possible_paths = []
+    
+    # Raw path from DB
+    possible_paths.append(doc.path)
+    
+    # Relative to project root (e.g. data/files/foo.pdf)
+    possible_paths.append(os.path.join(project_root, doc.path))
+    
+    # Relative to backend (unlikely but possible)
+    possible_paths.append(os.path.join(current_dir, doc.path))
+    
+    # Hardcoded data/files check if path is just filename
+    if "/" not in doc.path and "\\" not in doc.path:
+        possible_paths.append(os.path.join(project_root, "data", "files", doc.path))
+
+    final_path = None
+    for p in possible_paths:
+        # Normalize path separators
+        p = p.replace("/", os.sep).replace("\\", os.sep)
+        print(f"Checking path: {p}") # DEBUG
+        if os.path.exists(p) and os.path.isfile(p):
+            final_path = p
+            print(f"Found file at: {final_path}") # DEBUG
+            break
+            
+    if not final_path:
+        # Special case for JMail or URLs stored in path
+        if "jmail" in doc.path.lower() or "http" in doc.path:
+             # We can't serve a file, but we shouldn't crash. 
+             # For now, return 404 but with specific detail
+             raise HTTPException(status_code=404, detail=f"Document appears to be external/missing: {doc.path}")
+             
+        raise HTTPException(status_code=404, detail=f"File not found on server at {doc.path}")
+        
+    headers = {
+        "Content-Disposition": f"inline; filename={doc.filename}",
+        "Content-Type": "application/pdf"
+    }
+    return FileResponse(final_path, media_type="application/pdf", filename=doc.filename, headers=headers)
 
 @app.get("/document/{doc_id}/pages")
 async def get_document_pages(doc_id: int, db: Session = Depends(database.get_db)):

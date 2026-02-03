@@ -33,13 +33,36 @@ def search_pages(query: str, db: Session = None, filters: dict = None, limit: in
         
         hits = []
         for page in results:
+            # Extract basic snippet
+            text = page.text_content
+            snippet = text[:200]
+            
+            # If query is simple word, try to find it for better context
+            if query and len(query) > 2:
+                lower_text = text.lower()
+                lower_query = query.lower()
+                try:
+                    start_idx = lower_text.find(lower_query)
+                    if start_idx != -1:
+                        # Grab context around match
+                        start = max(0, start_idx - 60)
+                        end = min(len(text), start_idx + len(query) + 80)
+                        snippet = ("..." if start > 0 else "") + text[start:end] + ("..." if end < len(text) else "")
+                        # Highlight match (simple simulation)
+                        # In frontend we can use <mark> matching the query
+                except:
+                    pass
+
             hits.append({
                 "_id": f"page_{page.id}",
                 "_score": 1.0, 
                 "_source": {
-                    "text": page.text_content,
+                    "text": snippet,  # Return snippet instead of full text for list view
+                    "full_text_preview": text[:1000],
                     "page_id": page.id,
                     "document_id": page.document_id,
+                    "document_title": page.document.filename if page.document else "Unknown",
+                    "page_num": page.page_num
                 }
             })
         return hits
