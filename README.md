@@ -1,43 +1,75 @@
-# DOJ Document Explorer (Epstein Files Edition)
+# 📁 VAULT: EPSTEIN — Public Record Investigation Platform
 
-A professional-grade investigation platform designed to handle millions of pages from massive document leaks.
+![Social Preview](https://raw.githubusercontent.com/peromero-creater/VAULT-EPSTEIN/main/frontend/public/epstein.png)
 
-## Quick Start (Docker)
+> **"The truth is in the data."**
+> An advanced, open-source investigative platform designed to explore 3.5M+ pages of the Jeffrey Epstein document releases. Built for researchers, journalists, and the public.
 
-1. **Place your data**:
-   - Put PDFs/Images in `./data/files`
-   - Put Zips in `./data/zips`
+---
 
-2. **Launch Services**:
-   ```bash
-   docker-compose up --build -d
-   ```
+## 🛠 Features
 
-3. **Run Ingestion**:
-   ```bash
-   docker-compose exec api python /app/../ingestion/main.py
-   ```
+- **🔍 Page-Level Hybrid Search**: Combines BM25 and Vector search to find needles in a haystack of millions of pages.
+- **🛡️ Aggressive PII Masking**: Automated sanitization of emails, phone numbers, and addresses.
+- **🌍 Global Intelligence**: Automatically maps locations to countries to identify regional patterns.
+- **🕵️ Entity Extraction**: High-speed NER (Named Entity Recognition) identifying the people, organizations, and events mentioned.
+- **🔞 Safe Access**: Integrated 18+ verification gate and sensitive content disclaimers.
 
-4. **Access**:
-   - Web UI: http://localhost:3000
-   - API: http://localhost:8000
+---
 
-## Architecture
+## 🏗 System Architecture
 
-- **Frontend**: Next.js 15, Tailwind CSS, TypeScript. Dramatic aesthetic with 18+ safety gate and PII protection.
-- **Backend**: FastAPI (Python). High-performance asynchronous API for metadata and search orchestration.
-- **Search**: OpenSearch with KNN support for hybrid (BM25 + Semantic) search.
-- **AI Engine**: spaCy (NER) for person/org/place extraction + sentence-transformers for semantic embeddings.
+```mermaid
+graph TD
+    A[Raw PDFs/Images] --> B[Ingestion CLI]
+    B --> C{AI Pipeline}
+    C -->|OCR/Text| D[spaCy NER]
+    C -->|Embeddings| E[OpenSearch]
+    D -->|Entities| F[PostgreSQL]
+    
+    G[Next.js Frontend] --> H[FastAPI Backend]
+    H --> E
+    H --> F
+    
+    subgraph Safety Layer
+    G --- I[PII Blur Overlay]
+    G --- J[18+ Gate]
+    end
+```
 
-## Safety & Compliance
+---
 
-- **PII Automasking**: During ingestion, potential emails, phone numbers, and addresses are replaced with tags (e.g., `[EMAIL]`) in the indexed text.
-- **18+ Gate**: Mandatory click-through disclaimer required before accessing any records.
-- **Sensitive Content Banner**: Persistent warning banner throughout the application.
-- **Page-Level Results**: Search returns specific pages with contextual snippets.
+## 🚀 Quick Start
 
-## Features
+### 1. Requirements
+- Docker & Docker Compose
+- 8GB+ RAM Recommended
 
-- **Country Hub**: Aggregates all documents mentioning a specific nation. Lists top co-mentioned people.
-- **Person Hub**: Track mentions of specific individuals across millions of pages.
-- **Hybrid Search**: Combine keyword matches with AI-powered semantic understanding.
+### 2. Launch
+```bash
+git clone https://github.com/peromero-creater/VAULT-EPSTEIN.git
+cd VAULT-EPSTEIN
+docker-compose up -d
+```
+
+### 3. Ingest Data
+Drop your document files into `./data/files` and start the processor:
+```bash
+docker-compose exec api python /app/ingestion/main.py
+```
+
+---
+
+## 🛡 Safety & Compliance
+
+This platform is for **investigative purposes only**. It automatically masks PII to protect privacy while maintaining the historical integrity of the public record. 
+
+- **Emails**: Replaced with `[EMAIL]`
+- **Phones**: Replaced with `[PHONE]`
+- **Addresses**: Replaced with `[ADDRESS]`
+
+---
+
+## 🔗 Credits
+Built for the community. Share the truth.
+#EpsteinFiles #OpenSource #Investigation
