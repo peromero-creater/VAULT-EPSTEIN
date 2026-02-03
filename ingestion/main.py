@@ -9,8 +9,8 @@ from models import Document, Page, Entity, PageEntity, CountryStats, PersonCount
 from processor import mask_pii, extract_entities, get_text_quality
 from normalization import normalize_country
 
-DATA_DIR = Path("/data/files")
-ZIPS_DIR = Path("/data/zips")
+DATA_DIR = Path(__file__).parent.parent / "data" / "files"
+ZIPS_DIR = Path(__file__).parent.parent / "data" / "zips"
 
 def process_pdf(file_path: Path, db: Session):
     print(f"Processing PDF: {file_path.name}")

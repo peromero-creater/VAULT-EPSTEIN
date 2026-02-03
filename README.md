@@ -3,66 +3,55 @@
 ![Social Preview](https://raw.githubusercontent.com/peromero-creater/VAULT-EPSTEIN/main/frontend/public/epstein.png)
 
 > **"The truth is in the data."**
-> An advanced, open-source investigative platform designed to explore 3.5M+ pages of the Jeffrey Epstein document releases. Built for researchers, journalists, and the public.
+> An advanced, open-source investigative platform designed to explore 3.5M+ pages of the Jeffrey Epstein document releases.
 
 ---
 
 ## 🛠 Features
 
-- **🔍 Page-Level Hybrid Search**: Combines BM25 and Vector search to find needles in a haystack of millions of pages.
+- **🔍 Page-Level Search**: High-speed Postgres Full-Text search to find needles in a haystack of millions of pages.
 - **🛡️ Aggressive PII Masking**: Automated sanitization of emails, phone numbers, and addresses.
-- **🌍 Global Intelligence**: Automatically maps locations to countries to identify regional patterns.
 - **🕵️ Entity Extraction**: High-speed NER (Named Entity Recognition) identifying the people, organizations, and events mentioned.
-- **🔞 Safe Access**: Integrated 18+ verification gate and sensitive content disclaimers.
 
 ---
 
-## 🏗 System Architecture
+## 🏗 Local Setup (Docker-less)
 
-```mermaid
-graph TD
-    A[Raw PDFs/Images] --> B[Ingestion CLI]
-    B --> C{AI Pipeline}
-    C -->|OCR/Text| D[spaCy NER]
-    C -->|Embeddings| E[OpenSearch]
-    D -->|Entities| F[PostgreSQL]
-    
-    G[Next.js Frontend] --> H[FastAPI Backend]
-    H --> E
-    H --> F
-    
-    subgraph Safety Layer
-    G --- I[PII Blur Overlay]
-    G --- J[18+ Gate]
-    end
-```
-
----
-
-## 🚀 Quick Start
+This project has been streamlined to run directly on your machine using **Postgres** for data and search.
 
 ### 1. Requirements
-- Docker & Docker Compose
-- 8GB+ RAM Recommended
+- Python 3.10+
+- Node.js 18+
+- Postgres Database (Local or Cloud like [Neon.tech](https://neon.tech))
 
-### 2. Launch
+### 2. Backend Setup
 ```bash
-git clone https://github.com/peromero-creater/VAULT-EPSTEIN.git
-cd VAULT-EPSTEIN
-docker-compose up -d
+cd backend
+python -m venv venv
+# Windows: venv\Scripts\activate
+# Mac/Linux: source venv/bin/activate
+pip install -r requirements.txt
+python main.py
 ```
 
-### 3. Ingest Data
-Drop your document files into `./data/files` and start the processor:
+### 3. Frontend Setup
 ```bash
-docker-compose exec api python /app/ingestion/main.py
+cd frontend
+npm install
+npm run dev
+```
+
+### 4. Ingest Data
+Drop your PDF files into `./data/files` and start the processor:
+```bash
+python ingestion/main.py
 ```
 
 ---
 
 ## 🛡 Safety & Compliance
 
-This platform is for **investigative purposes only**. It automatically masks PII to protect privacy while maintaining the historical integrity of the public record. 
+This platform is for **investigative purposes only**. It automatically masks PII to protect privacy.
 
 - **Emails**: Replaced with `[EMAIL]`
 - **Phones**: Replaced with `[PHONE]`
@@ -72,4 +61,3 @@ This platform is for **investigative purposes only**. It automatically masks PII
 
 ## 🔗 Credits
 Built for the community. Share the truth.
-#EpsteinFiles #OpenSource #Investigation

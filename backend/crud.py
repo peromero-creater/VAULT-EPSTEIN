@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
-from models import Document, Page, Entity, PageEntity, CountryStats, PersonCountryCoMention
+from models import Document, Page, Entity, PageEntity, CountryStats, PersonCountryCoMention, FlightLog, AINarrative, Relationship
 from typing import List, Optional
 
 def get_countries(db: Session):
@@ -37,3 +37,33 @@ def get_person_details(db: Session, person_name: str):
 
 def get_page(db: Session, page_id: int):
     return db.query(Page).filter(Page.id == page_id).first()
+
+def get_flights(db: Session, limit: int = 100):
+    return db.query(FlightLog).order_by(desc(FlightLog.date)).limit(limit).all()
+
+def get_narratives(db: Session, narrative_type: Optional[str] = None):
+    query = db.query(AINarrative)
+    if narrative_type:
+        query = query.filter(AINarrative.narrative_type == narrative_type)
+    return query.order_by(desc(AINarrative.created_at)).all()
+
+def get_relationships(db: Session, entity_id: int):
+    return db.query(Relationship).filter(
+        (Relationship.source_entity_id == entity_id) | 
+        (Relationship.target_entity_id == entity_id)
+    ).all()
+
+def get_person_details_enhanced(db: Session, person_name: str):
+    person = db.query(Entity).filter_by(name=person_name, type="PERSON").first()
+    if not person:
+        return None
+        
+    pages = db.query(Page).join(PageEntity).filter(PageEntity.entity_id == person.id).limit(20).all()
+    relationships = get_relationships(db, person.id)
+    
+    return {
+        "person": person,
+        "pages": pages,
+        "relationships": relationships
+    }
+

@@ -1,13 +1,20 @@
 import os
-from sqlalchemy import create_all
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from models import Base
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://admin:secretpassword@db:5432/doc_explorer")
+# Default to a local Postgres if possible, fallback to SQLite for immediate testing
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./vault_epstein.db")
 
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+try:
+    if DATABASE_URL.startswith("sqlite"):
+        engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+    else:
+        engine = create_engine(DATABASE_URL)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+except Exception as e:
+    print(f"Error creating database engine: {e}")
+    raise
 
 def init_db():
     Base.metadata.create_all(bind=engine)
