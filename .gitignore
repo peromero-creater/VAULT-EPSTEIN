@@ -33,8 +33,3 @@ venv/
 pgdata/
 osdata/
 
-# Automation
-automation/.env
-automation/downloads/
-automation/node_modules/
-automation/*.png
